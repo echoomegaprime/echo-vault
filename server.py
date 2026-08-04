@@ -374,6 +374,25 @@ def pg_exec(sql: str, timeout: int = 20):
     return (err is None), err
 
 
+def _is_permanent_pg_error(err: str) -> bool:
+    """True when Postgres refused the row for a reason a retry cannot change.
+
+    Constraint/type/column failures are decisions about the data, not transient
+    conditions -- requeuing them builds a queue that can never drain. Connection,
+    timeout and lock errors are deliberately NOT listed: those are exactly the
+    failures the queue exists to survive.
+    """
+    e = (err or "").lower()
+    return any(s in e for s in (
+        "violates check constraint",
+        "violates not-null constraint",
+        "violates foreign key constraint",
+        "invalid input syntax",
+        "does not exist",          # missing column/table/type
+        "value too long",
+    ))
+
+
 def _mirror_context(kind: str, content: str, tags: list, importance: float = 0.75) -> bool:
     """Best-effort mirror to context_memories (cross-CC audit trail). Content is
     ALWAYS redacted metadata - callers never pass secret values. Never raises."""
@@ -394,6 +413,17 @@ def _mirror_context(kind: str, content: str, tags: list, importance: float = 0.7
         return True
     except Exception as e:
         log(f"context mirror failed (non-fatal): {_redact(str(e))[:200]}")
+        # Only queue failures a retry could plausibly fix. A CHECK/NOT NULL/FK
+        # violation is a PERMANENT rejection: the same row will be refused every
+        # time, so queuing it builds a pile that can never drain. This exact case
+        # sat at 228 rows from 2026-07-07 to 2026-08-04 -- kind='vault_access' is
+        # not in context_memories_kind_check -- while `attempts` stayed 0, so
+        # nothing backed off or gave up. The authoritative audit trail is the
+        # vault's own credential_access_log (521k rows, healthy); this mirror is
+        # a convenience copy and must never accumulate.
+        if _is_permanent_pg_error(str(e)):
+            log("context mirror rejected permanently (schema/constraint) - NOT queued")
+            return False
         queue_write("mirror_audit",
                     {"kind": kind, "content": content, "tags": tags,
                      "importance": importance}, str(e))
@@ -502,11 +532,18 @@ def vault_get(service: str, username: str = "") -> str:
     row, serr = snapshot_get(service, username)
     if row:
         _mirror_audit("get", service, row["username"], "local")
-        return json.dumps({"ok": True, "service": row["service"],
+        # ok stays True so existing callers keep working, but `degraded` gives them a
+        # field to key on. "may lag" was the wrong risk: measured 2026-08-04 this store
+        # is a divergent SUPERSET (5,025 rows vs canonical 4,003) holding 82 services
+        # canonical does not have -- so a hit here can be a SUPERSEDED value, not a
+        # missing one. A stale secret that authenticates nowhere reads as a live one.
+        return json.dumps({"ok": True, "degraded": True, "service": row["service"],
                            "username": row["username"], "secret": row["secret"],
                            "source": "local",
-                           "note": "served from read-only local snapshot (gate unavailable); "
-                                   "may lag the canonical vault",
+                           "note": "served from the legacy PLAINTEXT snapshot because the gate was "
+                                   "unavailable. This store diverges from canonical and may hold a "
+                                   "SUPERSEDED value. Verify before trusting an auth failure, and "
+                                   "re-read from the gate once it recovers.",
                            "gate_error": _redact(gerr)[:300]})
     return json.dumps({"ok": False, "service": service, "username": username,
                        "errors": {"gate": _redact(gerr)[:400], "local": serr[:300]}})
