@@ -433,9 +433,14 @@ def _mirror_context(kind: str, content: str, tags: list, importance: float = 0.7
 def _drain_audit_queue(max_rows: int = 10) -> None:
     """Replay queued (redacted) audit mirrors after a successful pg write."""
     with _db_lock, _db() as c:
-        rows = c.execute("SELECT id, payload FROM pending_writes WHERE op='mirror_audit' "
-                         "ORDER BY id LIMIT ?", (max_rows,)).fetchall()
-    for pid, payload_s in rows:
+        rows = c.execute("SELECT id, payload, last_error FROM pending_writes "
+                         "WHERE op='mirror_audit' ORDER BY id LIMIT ?", (max_rows,)).fetchall()
+    for pid, payload_s, last_error in rows:
+        # Never replay a row Postgres has already refused for a permanent reason.
+        # Without this, the new start-up trigger would re-attempt doomed rows on every
+        # boot forever -- turning a fix for one pileup into a slower version of it.
+        if last_error and _is_permanent_pg_error(last_error):
+            continue
         p = json.loads(payload_s)
         import hashlib as _h
         chash = _h.sha256(p["content"].encode("utf-8")).hexdigest()
@@ -692,4 +697,13 @@ if __name__ == "__main__":
         f"snapshot={VAULT_DB}, seat={SEAT})")
     if not SOVEREIGN_KEY:
         log("WARNING: ECHO_SOVEREIGN_KEY not set - gate tier disabled, local snapshot reads only")
+    # Drain on start-up, NOT only after a successful write. The old sole call site was
+    # inside _mirror_context's success path, so the queue filled while writes were
+    # failing and drained only once one succeeded -- it drained only when it did not
+    # need to. Three rows sat 9-10 days through a gate outage because of it. Start-up
+    # is a trigger that does not depend on the cluster being healthy right now.
+    try:
+        _drain_audit_queue(max_rows=200)
+    except Exception as exc:                      # never block the server from starting
+        log(f"startup drain failed (non-fatal): {_redact(str(exc))[:160]}")
     mcp.run()
