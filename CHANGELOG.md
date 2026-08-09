@@ -16,6 +16,7 @@ All notable changes to ECHO Vault are documented here. This project follows
 - Responsive browser console with a memory-only, non-exportable Web Crypto signing key.
 - Non-root container, read-only-root deployment defaults, staging-safe health checks, and Compose example.
 - Python 3.11/3.12 CI, real-process CLI E2E, container journey, CodeQL, Gitleaks, and repository-boundary gates.
+- Exact-revision Certification Forge journey plus governed conformance receipts for the eight-app ECHO GitHub suite.
 
 ### Security
 
