@@ -26,6 +26,7 @@ class Settings:
     data_dir: Path
     keys_file: Path
     clients_file: Path
+    audit_anchor_file: Path | None = None
     host: str = "127.0.0.1"
     port: int = 8080
     max_body_bytes: int = 131_072
@@ -38,18 +39,25 @@ class Settings:
     def database_path(self) -> Path:
         return self.data_dir / "vault.db"
 
+    @property
+    def audit_anchor_path(self) -> Path:
+        return self.audit_anchor_file or self.data_dir / "audit.anchor"
+
     @classmethod
     def from_env(cls) -> Settings:
         environment = os.getenv("ECHO_VAULT_ENV", "production").strip().lower()
         if environment not in {"production", "development", "test"}:
             raise ValueError("ECHO_VAULT_ENV must be production, development, or test")
+        data_dir = Path(os.getenv("ECHO_VAULT_DATA_DIR", "/var/lib/echo-vault"))
+        anchor_raw = os.getenv("ECHO_VAULT_AUDIT_ANCHOR_FILE")
         return cls(
             environment=environment,
-            data_dir=Path(os.getenv("ECHO_VAULT_DATA_DIR", "/var/lib/echo-vault")),
+            data_dir=data_dir,
             keys_file=Path(os.getenv("ECHO_VAULT_KEYS_FILE", "/run/secrets/echo_vault_keys")),
             clients_file=Path(
                 os.getenv("ECHO_VAULT_CLIENTS_FILE", "/run/secrets/echo_vault_clients")
             ),
+            audit_anchor_file=Path(anchor_raw) if anchor_raw else None,
             host=os.getenv("ECHO_VAULT_HOST", "127.0.0.1"),
             port=_bounded_int("ECHO_VAULT_PORT", 8080, 1, 65_535),
             max_body_bytes=_bounded_int("ECHO_VAULT_MAX_BODY_BYTES", 131_072, 1_024, 4_194_304),
@@ -62,6 +70,15 @@ class Settings:
     def validate(self) -> None:
         if self.environment == "production" and self.host in {"", "localhost"}:
             raise ValueError("production host must be explicit")
+        if self.environment == "production" and os.name != "posix":
+            raise ValueError(
+                "production requires a POSIX permission backend; "
+                "Windows is supported for development"
+            )
+        if self.nonce_ttl_seconds < self.timestamp_skew_seconds * 2:
+            raise ValueError(
+                "ECHO_VAULT_NONCE_TTL_SECONDS must be at least twice the timestamp skew"
+            )
         for label, path in (("key ring", self.keys_file), ("client manifest", self.clients_file)):
             if not path.is_file():
                 raise ValueError(f"{label} file is unavailable: {path}")

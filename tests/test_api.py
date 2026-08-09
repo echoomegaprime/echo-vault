@@ -26,6 +26,26 @@ async def test_health_readiness_and_security_headers(vault: VaultHarness) -> Non
 
 
 @pytest.mark.asyncio
+async def test_browser_console_is_packaged_and_uses_memory_only_signing(
+    vault: VaultHarness,
+) -> None:
+    console = await vault.client.get("/console")
+    assert console.status_code == 200
+    assert "ECHO Vault Console" in console.text
+    assert '<script src="/console/app.js" defer></script>' in console.text
+    assert "script-src 'self'" in console.headers["content-security-policy"]
+    assert console.headers["x-robots-tag"] == "noindex, nofollow"
+
+    javascript = await vault.client.get("/console/app.js")
+    assert javascript.status_code == 200
+    assert "crypto.subtle.sign" in javascript.text
+    assert "crypto.getRandomValues" in javascript.text
+    assert "localStorage" not in javascript.text
+    assert "sessionStorage" not in javascript.text
+    assert "document.cookie" not in javascript.text
+
+
+@pytest.mark.asyncio
 async def test_create_get_update_list_delete_journey(vault: VaultHarness) -> None:
     created = await vault.request(
         "POST",
@@ -148,6 +168,7 @@ async def test_rekey_preserves_plaintext_and_changes_key_id(vault: VaultHarness)
 
     ring_data = json.loads(vault.settings.keys_file.read_text())
     ring_data["keys"]["key-2"] = base64.urlsafe_b64encode(os.urandom(32)).decode().rstrip("=")
+    ring_data["active_key_id"] = "key-2"
     vault.settings.keys_file.write_text(json.dumps(ring_data))
     vault.app.state.store.keyring = KeyRing.load(vault.settings.keys_file)
 
@@ -171,6 +192,8 @@ async def test_oversized_body_is_rejected_before_parsing(vault: VaultHarness) ->
         body_override=b"{" + b"x" * 5_000 + b"}",
     )
     assert response.status_code == 413
+    assert response.headers["cache-control"].startswith("no-store")
+    assert response.headers["x-frame-options"] == "DENY"
 
 
 @pytest.mark.asyncio
@@ -195,9 +218,36 @@ async def test_ciphertext_and_audit_tampering_fail_closed(vault: VaultHarness) -
     with sqlite3.connect(vault.settings.database_path) as db:
         db.execute("UPDATE audit_events SET outcome='forged' WHERE id=1")
         db.commit()
-    ready = await vault.client.get("/readyz")
-    assert ready.status_code == 503
     audit = await vault.request("GET", "/v1/audit/verify")
     assert audit.status_code == 200
     assert audit.json()["valid"] is False
     assert audit.json()["first_bad_event_id"] == 1
+
+    with sqlite3.connect(vault.settings.database_path) as db:
+        db.execute(
+            "UPDATE audit_events SET entry_hash=? WHERE id=(SELECT MAX(id) FROM audit_events)",
+            ("f" * 64,),
+        )
+        db.commit()
+    ready = await vault.client.get("/readyz")
+    assert ready.status_code == 503
+    protected = await vault.request("GET", "/v1/secrets/demo/tamper")
+    assert protected.status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_audit_anchor_rejects_tail_deletion_and_database_rollback(
+    vault: VaultHarness,
+) -> None:
+    created = await vault.request(
+        "POST",
+        "/v1/secrets/demo/anchored",
+        payload={"secret": "synthetic", "metadata": {}, "tags": []},
+    )
+    assert created.status_code == 201
+
+    with sqlite3.connect(vault.settings.database_path) as db:
+        db.execute("DELETE FROM audit_events WHERE id=(SELECT MAX(id) FROM audit_events)")
+        db.commit()
+    ready = await vault.client.get("/readyz")
+    assert ready.status_code == 503

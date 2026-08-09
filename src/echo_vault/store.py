@@ -5,12 +5,15 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import os
+import stat
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import aiosqlite
 
@@ -90,13 +93,31 @@ CREATE TABLE IF NOT EXISTS vault_meta (
 
 
 class VaultStore:
-    def __init__(self, database_path: Path, keyring: KeyRing):
+    def __init__(self, database_path: Path, keyring: KeyRing, audit_anchor_path: Path):
         self.database_path = database_path
         self.keyring = keyring
+        self.audit_anchor_path = audit_anchor_path
+
+    @staticmethod
+    def _assert_private_file(path: Path) -> None:
+        if os.name == "posix" and stat.S_IMODE(path.stat().st_mode) & 0o077:
+            raise VaultCryptoError(f"audit anchor permissions are too broad: {path}")
+
+    def _harden_database_files(self) -> None:
+        if os.name != "posix":
+            return
+        for path in (
+            self.database_path,
+            Path(f"{self.database_path}-wal"),
+            Path(f"{self.database_path}-shm"),
+        ):
+            if path.exists():
+                path.chmod(0o600)
 
     @asynccontextmanager
     async def _connection(self) -> AsyncIterator[aiosqlite.Connection]:
         connection = await aiosqlite.connect(self.database_path, timeout=30)
+        self._harden_database_files()
         connection.row_factory = aiosqlite.Row
         try:
             await connection.execute("PRAGMA foreign_keys = ON")
@@ -106,7 +127,10 @@ class VaultStore:
             await connection.close()
 
     async def bootstrap(self) -> None:
-        self.database_path.parent.mkdir(parents=True, exist_ok=True)
+        self.database_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        self.audit_anchor_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if os.name == "posix":
+            self.database_path.parent.chmod(0o700)
         async with self._connection() as connection:
             await connection.execute("PRAGMA journal_mode = WAL")
             await connection.execute("PRAGMA synchronous = FULL")
@@ -114,7 +138,38 @@ class VaultStore:
             await connection.execute(
                 "INSERT OR IGNORE INTO vault_meta(key, value) VALUES('schema_version', '1')"
             )
+            await connection.execute(
+                "INSERT OR IGNORE INTO vault_meta(key, value) VALUES('database_id', ?)",
+                (str(uuid4()),),
+            )
             await connection.commit()
+            database_row = await (
+                await connection.execute("SELECT value FROM vault_meta WHERE key='database_id'")
+            ).fetchone()
+            if database_row is None:
+                raise VaultCryptoError("database identity is missing")
+            database_id = str(database_row[0])
+            tail = await (
+                await connection.execute(
+                    "SELECT id, occurred_at, entry_hash FROM audit_events ORDER BY id DESC LIMIT 1"
+                )
+            ).fetchone()
+        self._harden_database_files()
+        if not self.audit_anchor_path.exists():
+            if tail is not None:
+                raise VaultCryptoError(
+                    "audit anchor is missing for a non-empty database; restore the trusted anchor"
+                )
+            self._append_anchor(
+                database_id=database_id,
+                event_id=0,
+                occurred_at=now_iso(),
+                entry_hash="0" * 64,
+                previous_hash="0" * 64,
+            )
+        checkpoint = await self.verify_audit_checkpoint()
+        if not checkpoint["valid"]:
+            raise VaultCryptoError("audit checkpoint does not match the database")
 
     async def ping(self) -> bool:
         async with self._connection() as connection:
@@ -171,6 +226,110 @@ class VaultStore:
         ).encode()
         return hmac.new(self.keyring.audit_key, payload, hashlib.sha256).hexdigest()
 
+    def _anchor_record(
+        self,
+        *,
+        database_id: str,
+        event_id: int,
+        occurred_at: str,
+        entry_hash: str,
+    ) -> dict[str, str | int]:
+        body: dict[str, str | int] = {
+            "format": "echo-vault-audit-anchor-v1",
+            "database_id": database_id,
+            "event_id": event_id,
+            "occurred_at": occurred_at,
+            "entry_hash": entry_hash,
+        }
+        payload = json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
+        body["signature"] = hmac.new(self.keyring.audit_key, payload, hashlib.sha256).hexdigest()
+        return body
+
+    def _read_anchor(self) -> dict[str, str | int]:
+        self._assert_private_file(self.audit_anchor_path)
+        with self.audit_anchor_path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            if size <= 0:
+                raise VaultCryptoError("audit anchor is empty")
+            start = max(0, size - 16_384)
+            handle.seek(start)
+            payload = handle.read()
+        lines = payload.splitlines()
+        if start and lines:
+            lines = lines[1:]
+        if not lines:
+            raise VaultCryptoError("audit anchor has no complete record")
+        try:
+            row = json.loads(lines[-1])
+        except json.JSONDecodeError as exc:
+            raise VaultCryptoError("audit anchor is malformed") from exc
+        required = {
+            "format",
+            "database_id",
+            "event_id",
+            "occurred_at",
+            "entry_hash",
+            "signature",
+        }
+        if not isinstance(row, dict) or set(row) != required:
+            raise VaultCryptoError("audit anchor schema is invalid")
+        signature = row.pop("signature")
+        payload_to_verify = json.dumps(row, sort_keys=True, separators=(",", ":")).encode()
+        expected = hmac.new(self.keyring.audit_key, payload_to_verify, hashlib.sha256).hexdigest()
+        if not isinstance(signature, str) or not hmac.compare_digest(expected, signature):
+            raise VaultCryptoError("audit anchor signature is invalid")
+        row["signature"] = signature
+        return row
+
+    def _append_anchor(
+        self,
+        *,
+        database_id: str,
+        event_id: int,
+        occurred_at: str,
+        entry_hash: str,
+        previous_hash: str,
+    ) -> None:
+        if self.audit_anchor_path.exists():
+            previous = self._read_anchor()
+            if (
+                previous["database_id"] != database_id
+                or int(previous["event_id"]) != event_id - 1
+                or previous["entry_hash"] != previous_hash
+            ):
+                raise VaultCryptoError("audit anchor continuity check failed")
+        elif event_id != 0 or entry_hash != "0" * 64:
+            raise VaultCryptoError("audit anchor cannot start after genesis")
+
+        record = self._anchor_record(
+            database_id=database_id,
+            event_id=event_id,
+            occurred_at=occurred_at,
+            entry_hash=entry_hash,
+        )
+        encoded = json.dumps(record, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+        descriptor = os.open(
+            self.audit_anchor_path,
+            os.O_WRONLY | os.O_CREAT | os.O_APPEND,
+            0o600,
+        )
+        try:
+            os.write(descriptor, encoded)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        self._assert_private_file(self.audit_anchor_path)
+
+    @staticmethod
+    async def _database_id(connection: aiosqlite.Connection) -> str:
+        row = await (
+            await connection.execute("SELECT value FROM vault_meta WHERE key='database_id'")
+        ).fetchone()
+        if row is None:
+            raise VaultCryptoError("database identity is missing")
+        return str(row[0])
+
     async def _append_audit(
         self,
         connection: aiosqlite.Connection,
@@ -221,7 +380,36 @@ class VaultStore:
         )
         if int(cursor.lastrowid or 0) != next_id:
             raise RuntimeError("audit sequence changed during append")
+        database_id = await self._database_id(connection)
+        self._append_anchor(
+            database_id=database_id,
+            event_id=next_id,
+            occurred_at=occurred_at,
+            entry_hash=entry_hash,
+            previous_hash=previous_hash,
+        )
         return next_id
+
+    async def record_security_event(
+        self,
+        *,
+        actor: str,
+        action: str,
+        outcome: str,
+        details: dict[str, str | int | bool] | None = None,
+    ) -> None:
+        async with self._connection() as connection:
+            await connection.execute("BEGIN IMMEDIATE")
+            await self._append_audit(
+                connection,
+                actor=actor,
+                action=action,
+                namespace=None,
+                name=None,
+                outcome=outcome,
+                details=details,
+            )
+            await connection.commit()
 
     async def create(
         self,
@@ -534,6 +722,10 @@ class VaultStore:
     async def rekey_all(self, target_key_id: str, actor: str) -> dict[str, Any]:
         if target_key_id not in self.keyring.keys:
             raise VaultNotFoundError("target key is not loaded")
+        if target_key_id != self.keyring.active_key_id:
+            raise VaultConflictError(
+                "target key must be active before historical versions are rekeyed"
+            )
         async with self._connection() as connection:
             await connection.execute("BEGIN IMMEDIATE")
             rows = list(
@@ -584,6 +776,43 @@ class VaultStore:
             await connection.commit()
         return {"target_key_id": target_key_id, "versions_rekeyed": len(rows)}
 
+    async def verify_audit_checkpoint(self) -> dict[str, Any]:
+        """Verify the signed external tail against the database in constant work."""
+        try:
+            anchor = self._read_anchor()
+            async with self._connection() as connection:
+                database_id = await self._database_id(connection)
+                row = await (
+                    await connection.execute(
+                        "SELECT id, entry_hash FROM audit_events ORDER BY id DESC LIMIT 1"
+                    )
+                ).fetchone()
+        except (OSError, VaultCryptoError):
+            return {
+                "valid": False,
+                "events": 0,
+                "first_bad_event_id": None,
+                "database_id": None,
+                "terminal_hash": None,
+                "anchor_signature": None,
+            }
+
+        event_id = int(row["id"]) if row is not None else 0
+        entry_hash = str(row["entry_hash"]) if row is not None else "0" * 64
+        valid = (
+            anchor["database_id"] == database_id
+            and int(anchor["event_id"]) == event_id
+            and anchor["entry_hash"] == entry_hash
+        )
+        return {
+            "valid": valid,
+            "events": event_id,
+            "first_bad_event_id": None,
+            "database_id": database_id,
+            "terminal_hash": entry_hash,
+            "anchor_signature": anchor["signature"],
+        }
+
     async def verify_audit_chain(self) -> dict[str, Any]:
         async with self._connection() as connection:
             rows = list(
@@ -592,9 +821,14 @@ class VaultStore:
                 ).fetchall()
             )
         previous_hash = "0" * 64
+        expected_id = 1
         for row in rows:
-            if str(row["previous_hash"]) != previous_hash:
-                return {"valid": False, "events": len(rows), "first_bad_event_id": int(row["id"])}
+            if int(row["id"]) != expected_id or str(row["previous_hash"]) != previous_hash:
+                return {
+                    "valid": False,
+                    "events": len(rows),
+                    "first_bad_event_id": int(row["id"]),
+                }
             expected = self._audit_hash(
                 event_id=int(row["id"]),
                 occurred_at=str(row["occurred_at"]),
@@ -609,4 +843,11 @@ class VaultStore:
             if not hmac.compare_digest(expected, str(row["entry_hash"])):
                 return {"valid": False, "events": len(rows), "first_bad_event_id": int(row["id"])}
             previous_hash = str(row["entry_hash"])
-        return {"valid": True, "events": len(rows), "first_bad_event_id": None}
+            expected_id += 1
+        checkpoint = await self.verify_audit_checkpoint()
+        return {
+            **checkpoint,
+            "valid": bool(checkpoint["valid"]),
+            "events": len(rows),
+            "first_bad_event_id": None if checkpoint["valid"] else len(rows) or None,
+        }

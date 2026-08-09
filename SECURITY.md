@@ -19,5 +19,7 @@ Security fixes are provided for the latest tagged minor release. Until `1.0`, op
 - Mutations require an expected version once a secret exists.
 - Key rotation retains the key ID needed to decrypt historical versions.
 - Audit verification failure is a readiness failure.
+- The signed audit anchor is preserved independently from database snapshots.
+- Browser-console client material is memory-only and remote console access requires HTTPS.
 
 The complete attacker model and non-goals are documented in [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).

@@ -20,6 +20,7 @@ from .config import Settings
 
 _CLIENT_ID = re.compile(r"^[A-Za-z0-9_.-]{1,80}$")
 _NONCE = re.compile(r"^[A-Za-z0-9_-]{20,120}$")
+_DUMMY_SECRET = b"\x00" * 32
 
 
 def _b64encode(value: bytes) -> str:
@@ -44,6 +45,15 @@ def canonical_request(
 
 class NonceStore(Protocol):
     async def claim_nonce(self, client_id: str, nonce: str, expires_at: int) -> bool: ...
+
+    async def record_security_event(
+        self,
+        *,
+        actor: str,
+        action: str,
+        outcome: str,
+        details: dict[str, str | int | bool] | None = None,
+    ) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,18 +159,14 @@ class Authenticator:
         timestamp_raw = request.headers.get("x-vault-timestamp", "")
         nonce = request.headers.get("x-vault-nonce", "")
         supplied_signature = request.headers.get("x-vault-signature", "")
-        if not _CLIENT_ID.fullmatch(client_id) or not _NONCE.fullmatch(nonce):
-            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid authentication")
-        principal = self.registry.clients.get(client_id)
-        if principal is None or not principal.allows(scope, namespace):
-            raise HTTPException(status.HTTP_403_FORBIDDEN, "scope denied")
+        client_id_valid = _CLIENT_ID.fullmatch(client_id) is not None
+        nonce_valid = _NONCE.fullmatch(nonce) is not None
+        principal = self.registry.clients.get(client_id) if client_id_valid else None
         try:
             timestamp = int(timestamp_raw)
-        except ValueError as exc:
-            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid authentication") from exc
-        if abs(int(time.time()) - timestamp) > self.settings.timestamp_skew_seconds:
-            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "request timestamp expired")
-        self._consume(client_id)
+        except ValueError:
+            timestamp = 0
+        timestamp_valid = abs(int(time.time()) - timestamp) <= self.settings.timestamp_skew_seconds
         body = await request.body()
         canonical = canonical_request(
             request.method,
@@ -170,12 +176,37 @@ class Authenticator:
             timestamp_raw,
             nonce,
         )
-        expected = _b64encode(hmac.new(principal.secret, canonical, hashlib.sha256).digest())
-        if not hmac.compare_digest(expected, supplied_signature):
+        signing_secret = principal.secret if principal is not None else _DUMMY_SECRET
+        expected = _b64encode(hmac.new(signing_secret, canonical, hashlib.sha256).digest())
+        signature_valid = hmac.compare_digest(expected, supplied_signature)
+        if not all(
+            (client_id_valid, nonce_valid, timestamp_valid, principal is not None, signature_valid)
+        ):
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid authentication")
-        expires_at = timestamp + self.settings.nonce_ttl_seconds
+
+        assert principal is not None
+        self._consume(client_id)
+        receipt_time = int(time.time())
+        expires_at = max(
+            receipt_time + self.settings.nonce_ttl_seconds,
+            timestamp + self.settings.timestamp_skew_seconds + 1,
+        )
         if not await nonce_store.claim_nonce(client_id, nonce, expires_at):
+            await nonce_store.record_security_event(
+                actor=client_id,
+                action="auth.replay_rejected",
+                outcome="denied",
+                details={"scope": scope, "namespace_present": namespace is not None},
+            )
             raise HTTPException(status.HTTP_409_CONFLICT, "request replay rejected")
+        if not principal.allows(scope, namespace):
+            await nonce_store.record_security_event(
+                actor=client_id,
+                action="auth.scope_denied",
+                outcome="denied",
+                details={"scope": scope, "namespace_present": namespace is not None},
+            )
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "scope denied")
         return principal
 
 

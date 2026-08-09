@@ -73,3 +73,6 @@ class AuditVerification(BaseModel):
     valid: bool
     events: int
     first_bad_event_id: int | None = None
+    database_id: str | None = None
+    terminal_hash: str | None = None
+    anchor_signature: str | None = None

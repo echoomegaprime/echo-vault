@@ -10,6 +10,7 @@ services:
       - "127.0.0.1:8080:8080"
     volumes:
       - vault-data:/var/lib/echo-vault
+      - vault-audit:/var/lib/echo-vault-audit
     secrets:
       - echo_vault_keys
       - echo_vault_clients
@@ -26,3 +27,4 @@ secrets:
 
 volumes:
   vault-data:
+  vault-audit:

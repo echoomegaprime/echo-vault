@@ -3,11 +3,11 @@
 ## Trust boundaries
 
 ```text
-CLI / workload
+Browser console / CLI / workload
   | exact-byte HMAC request, client scope, timestamp, nonce
   v
 FastAPI boundary
-  | body budget -> identity -> signature -> replay -> namespace policy
+  | body budget -> signature -> rate budget -> replay -> namespace policy
   v
 Transactional store
   | immutable version + current pointer + chained audit event
@@ -15,6 +15,8 @@ Transactional store
 SQLite WAL                    Root-only key ring
   | ciphertext, metadata      | encryption keys + separate audit key
   +---------------------------+
+            |
+            +--> separately signed append-only audit anchor
 ```
 
 The service does not infer trust from IP addresses, proxy headers, caller-supplied actor names, or secret names. Actor identity comes from the verified client manifest entry.
@@ -47,7 +49,9 @@ UNIX_TIMESTAMP
 NONCE
 ```
 
-The server checks the client action scope and namespace, timestamp skew, signature, rate budget, and atomic nonce claim. Redirects are not followed by the bundled client because a redirect would change the signed target.
+The server validates the timestamp and HMAC before charging the resolved client's rate budget. It then atomically claims the nonce and evaluates action plus namespace authorization. This order prevents invalid signatures from starving or probing a known client. Redirects are not followed by the bundled client because a redirect would change the signed target.
+
+The browser console uses the same exact-byte contract through Web Crypto. Client material is imported into a non-exportable `CryptoKey`, retained only in tab memory, never placed in cookies or browser storage, and cleared on lock or page exit.
 
 ## Persistence model
 
@@ -57,6 +61,6 @@ Deletes are soft and retain encrypted history for recovery. Permanent erasure is
 
 ## Audit chain
 
-Each event records only actor, action, record coordinates, outcome, safe details, previous event hash, and its own HMAC. The audit key is separate from encryption keys. Readiness fails if the chain does not verify.
+Each event records only actor, action, record coordinates, outcome, safe details, previous event hash, and its own HMAC. The audit key is separate from encryption keys. Every append also writes a signed anchor record containing the database identity, terminal event ID, terminal hash, and timestamp to a separate journal. Readiness compares the database tail with that signed anchor in constant work; the authenticated deep-verification endpoint recomputes every retained link.
 
-The chain detects database modification; it does not prevent an attacker who possesses both the database and audit key from rewriting history. Export signed audit roots to independent storage for stronger non-repudiation.
+The anchor detects tail deletion, an empty-table reset, and restoration of an older database snapshot when the anchor journal is preserved independently. Deep verification detects retained-row modification. Neither control prevents an attacker who possesses the database, anchor, and audit key from rewriting all evidence. Replicate anchor records to independent append-only storage for stronger non-repudiation.

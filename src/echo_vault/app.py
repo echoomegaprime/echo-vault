@@ -3,10 +3,11 @@
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
 from . import __version__
 from .auth import Authenticator, ClientRegistry, Principal
@@ -24,6 +25,7 @@ from .models import (
 from .store import VaultConflictError, VaultNotFoundError, VaultStore
 
 _IDENTIFIER = re.compile(r"^[a-z0-9](?:[a-z0-9_.-]{0,126}[a-z0-9])?$")
+_WEB_ROOT = Path(__file__).with_name("web")
 
 
 def _validate_identifier(value: str, label: str) -> str:
@@ -46,7 +48,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         runtime_settings.validate()
         keyring = KeyRing.load(runtime_settings.keys_file)
         registry = ClientRegistry.load(runtime_settings.clients_file)
-        store = VaultStore(runtime_settings.database_path, keyring)
+        store = VaultStore(
+            runtime_settings.database_path,
+            keyring,
+            runtime_settings.audit_anchor_path,
+        )
         await store.bootstrap()
         app.state.store = store
         app.state.authenticator = Authenticator(registry, runtime_settings)
@@ -61,6 +67,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         redoc_url=None,
     )
 
+    def secure_response(response: Response) -> Response:
+        response.headers["Cache-Control"] = "no-store, private, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'none'; style-src 'self'; script-src 'self'; connect-src 'self'; "
+            "img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+        )
+        response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
+        response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
+        response.headers["Permissions-Policy"] = (
+            "camera=(), microphone=(), geolocation=(), payment=(), clipboard-write=(self)"
+        )
+        if runtime_settings.environment == "production":
+            response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+        return response
+
     @app.middleware("http")
     async def secure_transport(
         request: Request, call_next: Callable[[Request], Awaitable[Response]]
@@ -71,28 +97,59 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 try:
                     declared = int(content_length)
                 except ValueError:
-                    return JSONResponse({"detail": "invalid content length"}, status_code=400)
+                    return secure_response(
+                        JSONResponse({"detail": "invalid content length"}, status_code=400)
+                    )
                 if declared > runtime_settings.max_body_bytes:
-                    return JSONResponse({"detail": "request body too large"}, status_code=413)
+                    return secure_response(
+                        JSONResponse({"detail": "request body too large"}, status_code=413)
+                    )
             body = await request.body()
             if len(body) > runtime_settings.max_body_bytes:
-                return JSONResponse({"detail": "request body too large"}, status_code=413)
+                return secure_response(
+                    JSONResponse({"detail": "request body too large"}, status_code=413)
+                )
+            if request.url.path != "/v1/audit/verify":
+                store: VaultStore = request.app.state.store
+                checkpoint = await store.verify_audit_checkpoint()
+                if not checkpoint["valid"]:
+                    return secure_response(
+                        JSONResponse(
+                            {"detail": "audit integrity checkpoint failed"},
+                            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                        )
+                    )
         response = await call_next(request)
-        response.headers["Cache-Control"] = "no-store, private, max-age=0"
-        response.headers["Pragma"] = "no-cache"
-        response.headers["Expires"] = "0"
-        response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["X-Frame-Options"] = "DENY"
-        response.headers["Referrer-Policy"] = "no-referrer"
-        response.headers["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'"
-        return response
+        return secure_response(response)
+
+    async def record_failed_operation(request: Request, outcome: str) -> None:
+        principal = getattr(request.state, "vault_principal", None)
+        store = getattr(request.app.state, "store", None)
+        if principal is None or store is None:
+            return
+        try:
+            route = request.scope.get("route")
+            path_template = getattr(route, "path", "unmatched")
+            await store.record_security_event(
+                actor=principal.client_id,
+                action="request.failed",
+                outcome=outcome,
+                details={
+                    "method": request.method,
+                    "path_template": path_template,
+                },
+            )
+        except (OSError, RuntimeError, VaultCryptoError):
+            return
 
     @app.exception_handler(VaultConflictError)
-    async def conflict_handler(_: Request, exc: VaultConflictError) -> JSONResponse:
+    async def conflict_handler(request: Request, exc: VaultConflictError) -> JSONResponse:
+        await record_failed_operation(request, "conflict")
         return JSONResponse({"detail": str(exc)}, status_code=status.HTTP_409_CONFLICT)
 
     @app.exception_handler(VaultNotFoundError)
-    async def not_found_handler(_: Request, __: VaultNotFoundError) -> JSONResponse:
+    async def not_found_handler(request: Request, __: VaultNotFoundError) -> JSONResponse:
+        await record_failed_operation(request, "not_found")
         return JSONResponse({"detail": "resource not found"}, status_code=status.HTTP_404_NOT_FOUND)
 
     @app.exception_handler(VaultCryptoError)
@@ -112,7 +169,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 _validate_identifier(namespace, "namespace")
             store: VaultStore = request.app.state.store
             authenticator: Authenticator = request.app.state.authenticator
-            return await authenticator.verify(request, store, scope=scope, namespace=namespace)
+            principal = await authenticator.verify(request, store, scope=scope, namespace=namespace)
+            request.state.vault_principal = principal
+            return principal
 
         return dependency
 
@@ -130,10 +189,34 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def readyz(request: Request) -> dict[str, str]:
         store: VaultStore = request.app.state.store
         ready = await store.ping()
-        audit = await store.verify_audit_chain()
-        if not ready or not audit["valid"]:
+        checkpoint = await store.verify_audit_checkpoint()
+        if not ready or not checkpoint["valid"]:
             raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "not ready")
         return {"status": "ready"}
+
+    @app.get("/", include_in_schema=False)
+    async def root() -> RedirectResponse:
+        return RedirectResponse("/console", status_code=status.HTTP_307_TEMPORARY_REDIRECT)
+
+    @app.get("/console", include_in_schema=False, response_class=HTMLResponse)
+    async def console() -> HTMLResponse:
+        response = HTMLResponse((_WEB_ROOT / "console.html").read_text(encoding="utf-8"))
+        response.headers["X-Robots-Tag"] = "noindex, nofollow"
+        return response
+
+    @app.get("/console/app.css", include_in_schema=False)
+    async def console_css() -> Response:
+        return Response(
+            (_WEB_ROOT / "app.css").read_text(encoding="utf-8"),
+            media_type="text/css",
+        )
+
+    @app.get("/console/app.js", include_in_schema=False)
+    async def console_javascript() -> Response:
+        return Response(
+            (_WEB_ROOT / "app.js").read_text(encoding="utf-8"),
+            media_type="text/javascript",
+        )
 
     @app.post(
         "/v1/secrets/{namespace}/{name}",

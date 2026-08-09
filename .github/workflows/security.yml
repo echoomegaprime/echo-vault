@@ -16,29 +16,21 @@ jobs:
   repository-boundary:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
       - name: Reject secret-bearing artifacts
-        shell: bash
-        run: |
-          set -euo pipefail
-          violations="$(git ls-files | grep -Ei '(\.env($|\.)|\.(db|sqlite|sqlite3|pem|key|p12|pfx)$|credential.*export|vault.*export|backup)' | grep -v '^\.env\.example$' || true)"
-          if [[ -n "$violations" ]]; then
-            echo 'Forbidden secret-bearing artifact is tracked.' >&2
-            printf '%s\n' "$violations" >&2
-            exit 1
-          fi
+        run: python scripts/check_repository_boundary.py
       - name: Secret scan
-        uses: gitleaks/gitleaks-action@v2
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   codeql:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: github/codeql-action/init@v3
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: github/codeql-action/init@c4dd10e44af883a891fe31ced449bcb4a6728b9b # v3
         with:
           languages: python
-      - uses: github/codeql-action/analyze@v3
+      - uses: github/codeql-action/analyze@c4dd10e44af883a891fe31ced449bcb4a6728b9b # v3

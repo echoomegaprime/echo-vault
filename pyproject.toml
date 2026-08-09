@@ -47,6 +47,9 @@ Documentation = "https://github.com/echoomegaprime/echo-vault/tree/main/docs"
 [tool.hatch.build.targets.wheel]
 packages = ["src/echo_vault"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"src/echo_vault/web" = "echo_vault/web"
+
 [tool.pytest.ini_options]
 addopts = "-q --strict-markers"
 asyncio_mode = "auto"

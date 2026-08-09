@@ -7,7 +7,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 import httpx
 
@@ -25,7 +25,30 @@ def _client_identity() -> tuple[str, bytes]:
 
 
 def _base_url() -> str:
-    return os.getenv("ECHO_VAULT_URL", "http://127.0.0.1:8080").rstrip("/")
+    value = os.getenv("ECHO_VAULT_URL", "http://127.0.0.1:8080").rstrip("/")
+    parsed = urlsplit(value)
+    if parsed.username or parsed.password or not parsed.hostname:
+        raise SystemExit("ECHO_VAULT_URL must not contain credentials")
+    loopback = parsed.hostname in {"127.0.0.1", "localhost", "::1"}
+    insecure_override = os.getenv("ECHO_VAULT_ALLOW_INSECURE_HTTP") == "1"
+    if parsed.scheme != "https" and not (
+        parsed.scheme == "http" and (loopback or insecure_override)
+    ):
+        raise SystemExit("remote ECHO_VAULT_URL must use HTTPS")
+    return value
+
+
+def _write_private(path: Path, value: str) -> None:
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(value)
+            if not value.endswith("\n"):
+                handle.write("\n")
+    except Exception:
+        path.unlink(missing_ok=True)
+        raise
 
 
 def _request(method: str, path: str, *, query: str = "", payload: object | None = None) -> object:
@@ -69,8 +92,14 @@ def command_init(args: argparse.Namespace) -> None:
     (directory / "data").mkdir(mode=0o700, exist_ok=True)
     print(f"Created ECHO Vault material in {directory}")
     print("Client ID: local-admin")
-    print(f"One-time client secret: {one_time_secret}")
-    print("Store this value securely; it will not be printed again by ECHO Vault.")
+    if args.print_client_secret:
+        print(f"One-time client secret: {one_time_secret}")
+        print("Store this value securely; it will not be printed again by ECHO Vault.")
+    else:
+        secret_path = directory / "bootstrap-client.secret"
+        _write_private(secret_path, one_time_secret)
+        print(f"Bootstrap client secret written to {secret_path}")
+        print("Move it into a protected secret store, then remove the bootstrap file.")
 
 
 def command_serve(_: argparse.Namespace) -> None:
@@ -106,10 +135,15 @@ def command_update(args: argparse.Namespace) -> None:
 def command_get(args: argparse.Namespace) -> None:
     result = _request("GET", f"/v1/secrets/{args.namespace}/{args.name}")
     if args.json:
-        print(json.dumps(result, indent=2, sort_keys=True))
+        rendered = json.dumps(result, indent=2, sort_keys=True)
     else:
         assert isinstance(result, dict)
-        print(result["secret"])
+        rendered = str(result["secret"])
+    if args.show:
+        print(rendered)
+    else:
+        _write_private(Path(args.output).resolve(), rendered)
+        print(f"Secret written to {Path(args.output).resolve()}")
 
 
 def command_list(args: argparse.Namespace) -> None:
@@ -138,6 +172,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     init = commands.add_parser("init", help="create key and client manifests")
     init.add_argument("--directory", default=".echo-vault")
+    init.add_argument(
+        "--print-client-secret",
+        action="store_true",
+        help="explicitly print the bootstrap client secret to stdout",
+    )
     init.set_defaults(handler=command_init)
 
     serve = commands.add_parser("serve", help="start the API server")
@@ -158,6 +197,11 @@ def build_parser() -> argparse.ArgumentParser:
     get.add_argument("namespace")
     get.add_argument("name")
     get.add_argument("--json", action="store_true")
+    destination = get.add_mutually_exclusive_group(required=True)
+    destination.add_argument(
+        "--show", action="store_true", help="explicitly print the secret to stdout"
+    )
+    destination.add_argument("--output", help="write the secret to a new mode-0600 file")
     get.set_defaults(handler=command_get)
 
     listing = commands.add_parser("list", help="list non-secret metadata")

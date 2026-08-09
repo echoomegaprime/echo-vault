@@ -24,10 +24,10 @@
 | Database disclosure | AES-256-GCM payload encryption; keys stored separately |
 | Ciphertext swapping | Record ID, namespace, name, and version bound as AAD |
 | Cross-tenant access | Explicit client scopes and namespace allowlist |
-| Token replay | Timestamp window plus atomic nonce table |
+| Token replay | Timestamp window plus atomic nonce table retained for the complete acceptance window |
 | Lost updates | Required expected version and transactional compare-and-swap |
-| Audit tampering | Separate-key HMAC chain verified by readiness |
-| Resource exhaustion | Actual body limit, bounded models, per-client token bucket |
+| Audit rollback/truncation | Separate-key HMAC chain plus independently preserved signed anchor journal |
+| Resource exhaustion | Actual body limit, bounded models, post-authentication client token bucket, constant-work readiness |
 | Cache disclosure | `no-store`, `Pragma`, and expiry headers on all responses |
 | Accidental publication | Broad secret/database ignores plus CI artifact scanner |
 
@@ -38,6 +38,8 @@
 - Administrators protect and separately back up the key ring.
 - Client clocks remain within the configured skew window.
 - SQLite resides on a local filesystem with correct locking semantics.
+- The audit anchor is stored and replicated outside the database snapshot domain.
+- The operator browser and its extensions are trusted while plaintext is intentionally displayed.
 
 ## Explicit non-goals
 
@@ -47,6 +49,7 @@
 - preventing a host-root attacker from reading process memory;
 - non-repudiation after compromise of the audit key;
 - automatic permanent erasure from every backup.
+- protection from a browser or host that is already compromised while an operator session is unlocked.
 
 Deployments requiring those properties should integrate a KMS/HSM, external append-only audit sink, database service with replicated transactions, and formal retention controls.
 
