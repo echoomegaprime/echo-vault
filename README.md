@@ -88,6 +88,10 @@ Terminate TLS in a trusted reverse proxy. Do not expose the service over plainte
 
 See [Browser console](docs/GUI.md), [Architecture](docs/ARCHITECTURE.md), [Threat model](docs/THREAT_MODEL.md), [Operations](docs/OPERATIONS.md), [Security policy](SECURITY.md), and [Support](SUPPORT.md).
 
+## Governed release evidence
+
+The repository opts into all eight ECHO GitHub Apps through [`.echo/apps.json`](.echo/apps.json). Certification Forge reads [`.echo/certification.json`](.echo/certification.json) and executes its bounded, read-only repository journey against the exact source revision. That structural journey complements the hosted matrix, container boot, CodeQL, repository-boundary scan, and real-process CLI E2E; it does not replace them.
+
 ## Project status
 
 `0.x` is an early public release. The cryptographic format, migration rules, and API compatibility are covered by tests, but operators should review the threat model against their environment before production use.
