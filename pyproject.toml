@@ -1,0 +1,69 @@
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "echo-vault"
+version = "0.1.0"
+description = "Self-hosted encrypted secrets management with signed clients and tamper-evident audit trails."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+authors = [{ name = "ECHO OMEGA PRIME", email = "bobbymcwilliams@echo-op.com" }]
+keywords = ["secrets", "vault", "security", "fastapi", "aes-gcm", "self-hosted"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Security :: Cryptography",
+]
+dependencies = [
+  "aiosqlite==0.21.0",
+  "cryptography==45.0.6",
+  "fastapi==0.116.1",
+  "httpx==0.28.1",
+  "pydantic==2.11.7",
+  "uvicorn[standard]==0.35.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "mypy==1.17.1",
+  "pytest==8.4.1",
+  "pytest-asyncio==1.1.0",
+  "ruff==0.12.7",
+]
+
+[project.scripts]
+echo-vault = "echo_vault.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/echoomegaprime/echo-vault"
+Issues = "https://github.com/echoomegaprime/echo-vault/issues"
+Documentation = "https://github.com/echoomegaprime/echo-vault/tree/main/docs"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/echo_vault"]
+
+[tool.pytest.ini_options]
+addopts = "-q --strict-markers"
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "S", "ASYNC", "RUF"]
+ignore = ["S101"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S105", "S106"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+packages = ["echo_vault"]

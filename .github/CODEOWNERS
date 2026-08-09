@@ -1,0 +1,5 @@
+* @echoomegaprime
+/src/echo_vault/crypto.py @echoomegaprime
+/src/echo_vault/auth.py @echoomegaprime
+/src/echo_vault/store.py @echoomegaprime
+/docs/THREAT_MODEL.md @echoomegaprime

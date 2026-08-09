@@ -1,0 +1,28 @@
+services:
+  vault:
+    build: .
+    image: echo-vault:local
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - vault-data:/var/lib/echo-vault
+    secrets:
+      - echo_vault_keys
+      - echo_vault_clients
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+secrets:
+  echo_vault_keys:
+    file: .local-vault/keys.json
+  echo_vault_clients:
+    file: .local-vault/clients.json
+
+volumes:
+  vault-data:
