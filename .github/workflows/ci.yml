@@ -67,7 +67,7 @@ jobs:
             sleep 1
           done
           curl --fail --silent http://127.0.0.1:8080/readyz >/dev/null
-          printf '%s' 'container-synthetic-value' | docker run --rm --network host \
+          printf '%s' 'container-synthetic-value' | docker run --rm --interactive --network host \
             --env ECHO_VAULT_CLIENT_ID=local-admin \
             --env ECHO_VAULT_CLIENT_SECRET="$secret" \
             --env ECHO_VAULT_URL=http://127.0.0.1:8080 \
