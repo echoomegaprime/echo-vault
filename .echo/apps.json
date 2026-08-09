@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "apps": {
+    "repo-steward": {"enabled": true},
+    "certification-forge": {"enabled": true},
+    "knowledge-forge": {"enabled": true},
+    "fleet-builder": {"enabled": true},
+    "release-sentinel": {"enabled": true},
+    "arcanum": {"enabled": true},
+    "sdk": {"enabled": true},
+    "build-tracker": {"enabled": true}
+  }
+}

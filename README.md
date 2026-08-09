@@ -10,6 +10,8 @@ Self-hosted secrets management for teams that want a small, inspectable system i
 
 This repository contains no ECHO production data, credentials, keys, database snapshots, account catalog, or private infrastructure configuration.
 
+The committed [ECHO application manifest](.echo/apps.json) opts this repository into the governed eight-app GitHub suite. Each delivery must still pass installation authentication, fixed-action authorization, idempotency, and receipt sealing; opt-in alone is not a certificate.
+
 ## Why it is different
 
 - **Versioned authenticated encryption** — random 96-bit nonces, a key ID on every record, and AAD covering namespace, secret ID, and version.

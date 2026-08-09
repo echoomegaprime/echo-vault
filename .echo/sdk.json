@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "name": "echo-vault",
+  "capabilities": [
+    "echo.vault.secrets.put",
+    "echo.vault.secrets.get",
+    "echo.vault.secrets.list",
+    "echo.vault.secrets.delete",
+    "echo.vault.audit.verify",
+    "echo.vault.admin.rekey"
+  ],
+  "entrypoints": [
+    "echo_vault.app:create_app",
+    "echo_vault.cli:main"
+  ],
+  "data_classification": "secret",
+  "network": "loopback-or-https",
+  "authentication": "hmac-sha256-signed-request"
+}
