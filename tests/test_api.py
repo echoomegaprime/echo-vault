@@ -184,7 +184,9 @@ async def test_ciphertext_and_audit_tampering_fail_closed(vault: VaultHarness) -
 
     with sqlite3.connect(vault.settings.database_path) as db:
         row = db.execute("SELECT id, ciphertext_b64 FROM secret_versions LIMIT 1").fetchone()
-        changed = row[1][:-1] + ("A" if row[1][-1] != "A" else "B")
+        ciphertext = bytearray(base64.urlsafe_b64decode(row[1] + "=" * (-len(row[1]) % 4)))
+        ciphertext[-1] ^= 1
+        changed = base64.urlsafe_b64encode(bytes(ciphertext)).decode().rstrip("=")
         db.execute("UPDATE secret_versions SET ciphertext_b64=? WHERE id=?", (changed, row[0]))
         db.commit()
     broken = await vault.request("GET", "/v1/secrets/demo/tamper")

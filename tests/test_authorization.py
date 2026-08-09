@@ -34,6 +34,7 @@ async def test_namespace_and_action_scopes_are_enforced(tmp_path: Path) -> None:
             }
         )
     )
+    clients.chmod(0o600)
     settings = Settings("test", tmp_path / "data", keys, clients)
     app = create_app(settings)
     async with app.router.lifespan_context(app):
