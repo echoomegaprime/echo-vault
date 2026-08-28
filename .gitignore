@@ -2,3 +2,4 @@ __pycache__/
 *.pyc
 local_queue.db
 *.db
+dead_mirror_audit_20260804.jsonl

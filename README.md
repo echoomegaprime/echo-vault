@@ -55,10 +55,28 @@ Two consecutive transport failures open a per-endpoint circuit breaker for 120 s
 - Secret **values never land in stderr logs, the local SQLite queue, or the
   context mirror** — only `service/username` metadata is recorded (redacted
   access-audit rows mirrored to `arcanum_sdk.context_memories`, fire-and-forget
-  in a daemon thread; queued locally in `local_queue.db` during outages and
-  drained on the next successful mirror).
-- Gate/worker error text is scrubbed of the secret value and the sovereign key
-  (`_redact`) before it is returned or logged.
+  in a daemon thread; queued locally in `local_queue.db` during outages).
+- The audit queue starts an immediate daemon pass and drains every 30 seconds,
+  plus opportunistic wakeups after a successful foreground mirror. `mcp.run()`
+  never waits for the startup replay, so recovery does not require a new vault
+  request or successful foreground write and cannot block MCP startup.
+- Retry state is durable: each transient failure increments `attempts`, stores
+  a redacted `last_error`, and advances `next_attempt_at` with bounded
+  exponential backoff. The default policy is 8 attempts, 5 seconds initial
+  delay, and a 300 second ceiling.
+- Every queued operation is accounted for. Registered operations dispatch;
+  unknown operations, malformed payloads, schema/constraint failures, and
+  exhausted retries move transactionally to `dead_letters`. Drains process
+  successive batches rather than treating batch size as the total, while each
+  pass remains bounded to 200 rows, 20 batches, and a 20-second deadline.
+- SQLite leases are claimed under `BEGIN IMMEDIATE`; per-row heartbeats keep a
+  live dispatcher fenced from sibling processes, while expired leases recover
+  automatically after a crashed process.
+- Queue payloads are capped at 16 KiB and total pending-plus-DLQ depth at 10,000
+  rows. The DB file is set to owner read/write permissions where supported.
+- Mirror `importance` is accepted only as a finite non-boolean number from 0 to
+  1 before SQL is assembled. Gate/worker error text scrubs every supplied
+  non-empty secret, including 1-3 character values, plus the sovereign key.
 - `vault_list`/`vault_stats`/`vault_put` response bodies are defensively
   stripped of any value-bearing keys (`secret`, `password`, `token`, …).
 - The snapshot DB is opened read-only; this server can never write it.
@@ -92,3 +110,16 @@ python test_client.py <service> [username] # probe a specific credential
 | `ECHO_VAULT_DB` | `C:\ECHO_OMEGA_PRIME\SECURE_VAULT\master_vault.db` (ro snapshot) |
 | `ECHO_SSH_HOST` | `forge` (audit-mirror tier only) |
 | `ECHO_SEAT` | `echo-vault-mcp` |
+| `ECHO_VAULT_QUEUE_DRAIN_INTERVAL` | `30` seconds |
+| `ECHO_VAULT_QUEUE_BASE_DELAY` | `5` seconds |
+| `ECHO_VAULT_QUEUE_MAX_DELAY` | `300` seconds |
+| `ECHO_VAULT_QUEUE_MAX_ATTEMPTS` | `8` |
+| `ECHO_VAULT_QUEUE_BATCH_SIZE` | `10` |
+| `ECHO_VAULT_QUEUE_MAX_PAYLOAD` | `16384` bytes |
+| `ECHO_VAULT_QUEUE_MAX_DEPTH` | `10000` rows |
+
+Queue verification is deterministic and uses only temporary SQLite files:
+
+```
+python -m unittest -v test_durable_queue.py
+```
