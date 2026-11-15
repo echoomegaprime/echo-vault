@@ -16,6 +16,7 @@ All notable changes to ECHO Vault are documented here. This project follows
 - Responsive browser console with a memory-only, non-exportable Web Crypto signing key.
 - Non-root container, read-only-root deployment defaults, staging-safe health checks, and Compose example.
 - Python 3.11/3.12 CI, real-process CLI E2E, container journey, CodeQL, Gitleaks, and repository-boundary gates.
+- Exact-revision Certification Forge journey plus governed conformance receipts for the eight-app ECHO GitHub suite.
 
 ### Security
 
@@ -23,5 +24,6 @@ All notable changes to ECHO Vault are documented here. This project follows
 - The CLI rejects plaintext transport to remote hosts and does not print bootstrap or retrieved secrets by default.
 - Protected requests fail closed when the audit integrity checkpoint is unhealthy.
 - GitHub Actions and the container base image are pinned to immutable revisions.
+- The governed release check fails closed unless Certification Forge returns a signed terminal `PRODUCTION_READY` verdict.
 
 [0.1.0]: https://github.com/echoomegaprime/echo-vault/releases/tag/v0.1.0
