@@ -24,5 +24,6 @@ All notable changes to ECHO Vault are documented here. This project follows
 - The CLI rejects plaintext transport to remote hosts and does not print bootstrap or retrieved secrets by default.
 - Protected requests fail closed when the audit integrity checkpoint is unhealthy.
 - GitHub Actions and the container base image are pinned to immutable revisions.
+- The governed release check fails closed unless Certification Forge returns a signed terminal `PRODUCTION_READY` verdict.
 
 [0.1.0]: https://github.com/echoomegaprime/echo-vault/releases/tag/v0.1.0
