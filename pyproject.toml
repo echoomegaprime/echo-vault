@@ -22,7 +22,7 @@ classifiers = [
 dependencies = [
   "aiosqlite==0.21.0",
   "cryptography==45.0.6",
-  "fastapi==0.116.1",
+  "fastapi==0.141.1",
   "httpx==0.28.1",
   "pydantic==2.11.7",
   "uvicorn[standard]==0.35.0",
